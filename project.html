@@ -3,12 +3,22 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3Dオブジェクト配置・撮影システム (プロジェクト保存対応版)</title>
+    <title>3Dオブジェクト配置・撮影システム (超拡張版)</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #2c3e50; font-family: sans-serif; }
-        #canvas-container { width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; background-color: #e2e8f0; }
-        canvas { display: block; outline: none; box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
+        #canvas-container { width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; background-color: #2c3e50; }
+        canvas { display: block; outline: none; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        
+        /* 左側のメインUI */
         #ui-overlay { position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 8px; width: 250px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-height: 90vh; overflow-y: auto;}
+        
+        /* 右下のアウトライナー(オブジェクト一覧) */
+        #outliner-overlay { position: absolute; bottom: 15px; right: 15px; z-index: 10; background: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 8px; width: 220px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-height: 40vh; display: flex; flex-direction: column; }
+        #outliner-list { overflow-y: auto; flex-grow: 1; margin-top: 5px; }
+        .outliner-item { padding: 8px; cursor: pointer; border-bottom: 1px solid #eee; font-size: 13px; display: flex; align-items: center; transition: background 0.1s;}
+        .outliner-item:hover { background-color: #e2e8f0; }
+        .outliner-item.selected { background-color: #3498db; color: white; border-radius: 4px; border-bottom: none; font-weight: bold;}
+
         button, select { margin-top: 8px; padding: 8px; width: 100%; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; }
         button:hover { background-color: #e9e9e9; }
         .action-btn { background-color: #3498db; color: white; font-weight: bold; border: none; }
@@ -42,11 +52,13 @@
             <button id="add-person">👤 人物を追加</button>
             <button id="add-building">🏢 建物を追加</button>
             <div class="hint">
-                <strong>📥 GLBファイルを画面にドラッグ＆ドロップで追加できます</strong><br><br>
+                <strong>📥 GLBファイルを画面にドラッグ＆ドロップ可能</strong><br><br>
                 【操作ショートカット】<br>
-                T / R / Sキー： 移動/回転/拡大縮小<br>
-                Deleteキー： 選択オブジェクト削除<br>
-                Ctrl + Z： 操作のやり直し (Undo)
+                T / R / S： 移動/回転/拡大縮小<br>
+                Delete： 選択オブジェクト削除<br>
+                <strong>Ctrl + C： コピー</strong><br>
+                <strong>Ctrl + V： ペースト (複製)</strong><br>
+                Ctrl + Z： やり直し (Undo)
             </div>
             
             <hr>
@@ -67,6 +79,11 @@
         </div>
     </div>
 
+    <div id="outliner-overlay">
+        <h4 style="margin: 0; font-size: 14px; border-bottom: 1px solid #ccc; padding-bottom: 8px;">📋 オブジェクト一覧</h4>
+        <div id="outliner-list"></div>
+    </div>
+
     <div id="canvas-container"></div>
     <img id="photo-result" alt="撮影プレビュー">
 
@@ -85,22 +102,24 @@
         container.appendChild(renderer.domElement);
 
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0xdbeafe); 
+        scene.background = new THREE.Color(0x87CEEB); // デフォルトの空の色
         
         const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
         camera.position.set(0, 5, 15);
 
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
         scene.add(ambientLight);
-        const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
         dirLight.position.set(10, 20, 10);
         dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048; // 影をきれいに
+        dirLight.shadow.mapSize.height = 2048;
         scene.add(dirLight);
 
         const gridHelper = new THREE.GridHelper(50, 50);
         scene.add(gridHelper);
         const plane = new THREE.Mesh(
-            new THREE.PlaneGeometry(50, 50),
+            new THREE.PlaneGeometry(100, 100),
             new THREE.MeshStandardMaterial({ color: 0x999999, depthWrite: false })
         );
         plane.rotation.x = -Math.PI / 2;
@@ -119,32 +138,57 @@
         let cameraGui = null;
         const guiRefs = { objPos: {}, camPos: {}, camTarget: {} };
 
+        // ★ 追加: クリップボード (コピー用)
+        let clipboard = null;
+
+        // ★ 追加: 環境・照明設定 (グローバルGUI)
+        const envSettings = {
+            bgColor: scene.background.getHex(),
+            groundColor: plane.material.color.getHex(),
+            ambLightInt: ambientLight.intensity,
+            dirLightInt: dirLight.intensity,
+            dirLightColor: dirLight.color.getHex(),
+            dirLightX: dirLight.position.x,
+            dirLightY: dirLight.position.y,
+            dirLightZ: dirLight.position.z,
+        };
+
+        const envGui = new GUI({ title: '🌍 環境・照明設定' });
+        envGui.addColor(envSettings, 'bgColor').name('空（背景）の色').onChange(c => scene.background.setHex(c));
+        envGui.addColor(envSettings, 'groundColor').name('地面の色').onChange(c => plane.material.color.setHex(c));
+        const lightFolder = envGui.addFolder('照明（ライト）');
+        lightFolder.add(envSettings, 'ambLightInt', 0, 2).name('全体の明るさ').onChange(v => ambientLight.intensity = v);
+        lightFolder.add(envSettings, 'dirLightInt', 0, 3).name('太陽の強さ').onChange(v => dirLight.intensity = v);
+        lightFolder.addColor(envSettings, 'dirLightColor').name('太陽の色').onChange(c => dirLight.color.setHex(c));
+        lightFolder.add(envSettings, 'dirLightX', -50, 50).name('太陽の向き (X)').onChange(v => dirLight.position.x = v);
+        lightFolder.add(envSettings, 'dirLightY', 0, 50).name('太陽の高さ (Y)').onChange(v => dirLight.position.y = v);
+        lightFolder.add(envSettings, 'dirLightZ', -50, 50).name('太陽の向き (Z)').onChange(v => dirLight.position.z = v);
+
+        // Undo用履歴
         const historyStack = [];
         const MAX_HISTORY = 30;
 
         function saveHistory() {
             const snapshot = state.objects.map(obj => {
                 const data = {
-                    obj: obj,
-                    pos: obj.position.clone(),
-                    rot: obj.rotation.clone(),
-                    scale: obj.scale.clone(),
-                    color: obj.userData.color
+                    obj: obj, pos: obj.position.clone(), rot: obj.rotation.clone(), scale: obj.scale.clone(), color: obj.userData.color
                 };
                 if (obj.userData.joints) {
                     data.joints = {
-                        leftArmX: obj.userData.joints.leftArm.rotation.x,
-                        rightArmX: obj.userData.joints.rightArm.rotation.x,
-                        leftLegX: obj.userData.joints.leftLeg.rotation.x,
-                        rightLegX: obj.userData.joints.rightLeg.rotation.x,
+                        leftArmX: obj.userData.joints.leftArm.rotation.x, rightArmX: obj.userData.joints.rightArm.rotation.x,
+                        leftLegX: obj.userData.joints.leftLeg.rotation.x, rightLegX: obj.userData.joints.rightLeg.rotation.x,
                     };
                 }
                 return data;
             });
-            historyStack.push({
-                objects: snapshot,
-                selectedId: state.selectedObject ? state.selectedObject.userData.id : null
-            });
+            // 環境設定も履歴に含める
+            const envSnapshot = {
+                bgColor: scene.background.getHex(), groundColor: plane.material.color.getHex(),
+                ambLightInt: ambientLight.intensity, dirLightInt: dirLight.intensity,
+                dirLightColor: dirLight.color.getHex(), dirLightPos: dirLight.position.clone()
+            };
+
+            historyStack.push({ objects: snapshot, env: envSnapshot, selectedId: state.selectedObject ? state.selectedObject.userData.id : null });
             if (historyStack.length > MAX_HISTORY) historyStack.shift();
         }
 
@@ -155,45 +199,68 @@
             const snapshotIds = snapshot.objects.map(s => s.obj.userData.id);
             const currentObjects = [...state.objects];
             currentObjects.forEach(o => {
-                if (!snapshotIds.includes(o.userData.id)) {
-                    scene.remove(o);
-                    state.objects = state.objects.filter(obj => obj !== o);
-                }
+                if (!snapshotIds.includes(o.userData.id)) { scene.remove(o); state.objects = state.objects.filter(obj => obj !== o); }
             });
 
             snapshot.objects.forEach(s => {
                 const obj = s.obj;
-                if (!scene.children.includes(obj)) {
-                    scene.add(obj);
-                    if (!state.objects.includes(obj)) state.objects.push(obj);
-                }
-
-                obj.position.copy(s.pos);
-                obj.rotation.copy(s.rot);
-                obj.scale.copy(s.scale);
+                if (!scene.children.includes(obj)) { scene.add(obj); if (!state.objects.includes(obj)) state.objects.push(obj); }
+                obj.position.copy(s.pos); obj.rotation.copy(s.rot); obj.scale.copy(s.scale);
                 
                 if (s.color !== undefined) {
                     if (obj.userData.type === 'building') obj.material.color.setHex(s.color);
                     else if (obj.userData.type === 'person') obj.userData.material.color.setHex(s.color);
                     obj.userData.color = s.color;
                 }
-
                 if (s.joints && obj.userData.joints) {
-                    obj.userData.joints.leftArm.rotation.x = s.joints.leftArmX;
-                    obj.userData.joints.rightArm.rotation.x = s.joints.rightArmX;
-                    obj.userData.joints.leftLeg.rotation.x = s.joints.leftLegX;
-                    obj.userData.joints.rightLeg.rotation.x = s.joints.rightLegX;
+                    obj.userData.joints.leftArm.rotation.x = s.joints.leftArmX; obj.userData.joints.rightArm.rotation.x = s.joints.rightArmX;
+                    obj.userData.joints.leftLeg.rotation.x = s.joints.leftLegX; obj.userData.joints.rightLeg.rotation.x = s.joints.rightLegX;
                 }
             });
 
-            transformControl.detach();
-            state.selectedObject = null;
-            if (objGui) objGui.hide();
-
-            if (snapshot.selectedId) {
-                const sel = state.objects.find(o => o.userData.id === snapshot.selectedId);
-                if (sel) selectObject(sel);
+            // 環境設定の復元
+            if(snapshot.env) {
+                scene.background.setHex(snapshot.env.bgColor); plane.material.color.setHex(snapshot.env.groundColor);
+                ambientLight.intensity = snapshot.env.ambLightInt; dirLight.intensity = snapshot.env.dirLightInt;
+                dirLight.color.setHex(snapshot.env.dirLightColor); dirLight.position.copy(snapshot.env.dirLightPos);
+                
+                envSettings.bgColor = snapshot.env.bgColor; envSettings.groundColor = snapshot.env.groundColor;
+                envSettings.ambLightInt = snapshot.env.ambLightInt; envSettings.dirLightInt = snapshot.env.dirLightInt;
+                envSettings.dirLightColor = snapshot.env.dirLightColor;
+                envSettings.dirLightX = snapshot.env.dirLightPos.x; envSettings.dirLightY = snapshot.env.dirLightPos.y; envSettings.dirLightZ = snapshot.env.dirLightPos.z;
+                if(envGui) envGui.controllersRecursive().forEach(c => c.updateDisplay());
             }
+
+            transformControl.detach(); state.selectedObject = null; if (objGui) objGui.hide();
+            if (snapshot.selectedId) { const sel = state.objects.find(o => o.userData.id === snapshot.selectedId); if (sel) selectObject(sel); }
+            updateOutliner();
+        }
+
+        // --- ★ 追加: アウトライナーの更新処理 ---
+        function updateOutliner() {
+            const container = document.getElementById('outliner-list');
+            container.innerHTML = '';
+            
+            // 逆順（新しいものが上）で表示
+            [...state.objects].reverse().forEach((obj) => {
+                const div = document.createElement('div');
+                div.className = 'outliner-item' + (state.selectedObject === obj ? ' selected' : '');
+                
+                let icon = '📦';
+                let name = obj.userData.name || 'オブジェクト';
+                if (obj.userData.type === 'building') { icon = '🏢'; name = '建物'; }
+                else if (obj.userData.type === 'person') { icon = '👤'; name = '人物'; }
+                else if (obj.userData.type === 'glb') { icon = '📥'; }
+
+                div.textContent = `${icon} ${name} ${obj.userData.id}`;
+                
+                // リストクリックで選択
+                div.onclick = () => {
+                    if (transformControl.dragging) return;
+                    selectObject(obj);
+                };
+                container.appendChild(div);
+            });
         }
 
         let guiIsActive = false;
@@ -220,11 +287,60 @@
             }
         });
 
+        // --- ★ 追加: コピー＆ペースト (複製) 処理 ---
+        function duplicateObject(sourceObj) {
+            saveHistory();
+            let newObj;
+
+            if (sourceObj.userData.type === 'building') {
+                newObj = createBuilding();
+                newObj.material.color.setHex(sourceObj.userData.color);
+            } else if (sourceObj.userData.type === 'person') {
+                newObj = createPerson();
+                newObj.userData.material.color.setHex(sourceObj.userData.color);
+                const sj = sourceObj.userData.joints;
+                const nj = newObj.userData.joints;
+                nj.leftArm.rotation.x = sj.leftArm.rotation.x; nj.rightArm.rotation.x = sj.rightArm.rotation.x;
+                nj.leftLeg.rotation.x = sj.leftLeg.rotation.x; nj.rightLeg.rotation.x = sj.rightLeg.rotation.x;
+            } else if (sourceObj.userData.type === 'glb') {
+                // GLBの複製
+                const initData = {
+                    position: [sourceObj.position.x + 1.5, sourceObj.position.y, sourceObj.position.z + 1.5],
+                    rotation: sourceObj.rotation.toArray(),
+                    scale: sourceObj.scale.toArray()
+                };
+                loadGLB(sourceObj.userData.glbData, sourceObj.userData.name, initData);
+                return; // loadGLB内で追加・選択処理を行うためここで終了
+            }
+
+            if (newObj) {
+                newObj.position.copy(sourceObj.position);
+                // 重ならないように少しずらす
+                newObj.position.x += 1.5; 
+                newObj.position.z += 1.5;
+                newObj.rotation.copy(sourceObj.rotation);
+                newObj.scale.copy(sourceObj.scale);
+                selectObject(newObj);
+            }
+        }
+
+        // キーボード操作
         window.addEventListener('keydown', function (event) {
             if (state.mode !== 'placement') return;
+            
+            // Undo
             if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
                 event.preventDefault(); undo(); return;
             }
+            // Copy
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+                if (state.selectedObject) { clipboard = state.selectedObject; }
+            }
+            // Paste (複製)
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
+                if (clipboard) duplicateObject(clipboard);
+            }
+
             switch (event.key.toLowerCase()) {
                 case 't': transformControl.setMode('translate'); break;
                 case 'r': transformControl.setMode('rotate'); break;
@@ -236,6 +352,7 @@
             }
         });
 
+
         // --- 4. オブジェクト生成関数 ---
         let objectCounter = 0;
 
@@ -243,10 +360,10 @@
             transformControl.detach(); scene.remove(obj);
             state.objects = state.objects.filter(o => o !== obj);
             state.selectedObject = null; if (objGui) objGui.hide();
+            updateOutliner();
         }
 
         const gltfLoader = new GLTFLoader();
-        // dataURL: GLBファイルの生データ(Base64), initialData: セーブデータ復元時の初期値
         function loadGLB(dataURL, name, initialData = null) {
             gltfLoader.load(dataURL, (gltf) => {
                 if(!initialData) saveHistory(); 
@@ -261,11 +378,11 @@
                     model.position.set(0, 0, 0); 
                 }
                 
-                // dataURLをuserDataに保存しておく（プロジェクト保存時に埋め込むため）
                 model.userData = { type: 'glb', id: ++objectCounter, name: name, glbData: dataURL };
                 scene.add(model);
                 state.objects.push(model);
-                if (!initialData) selectObject(model);
+                selectObject(model);
+                updateOutliner();
             });
         }
 
@@ -276,7 +393,9 @@
             building.castShadow = true;
             building.position.set((Math.random() - 0.5) * 10, 0, (Math.random() - 0.5) * 10);
             building.userData = { type: 'building', id: ++objectCounter, color: material.color.getHex() };
-            scene.add(building); state.objects.push(building); return building;
+            scene.add(building); state.objects.push(building); 
+            updateOutliner();
+            return building;
         }
 
         function createPerson() {
@@ -298,35 +417,32 @@
 
             personGroup.position.set((Math.random() - 0.5) * 10, 0, (Math.random() - 0.5) * 10);
             personGroup.userData = { type: 'person', id: ++objectCounter, color: color, material: material, joints: { leftArm, rightArm, leftLeg, rightLeg } };
-            scene.add(personGroup); state.objects.push(personGroup); return personGroup;
+            scene.add(personGroup); state.objects.push(personGroup); 
+            updateOutliner();
+            return personGroup;
         }
 
         // --- 5. プロジェクトのセーブ＆ロード ---
-        
-        // 保存処理
         document.getElementById('save-project').addEventListener('click', () => {
             const projectData = {
                 cameraPos: camera.position.toArray(),
                 cameraTarget: controls.target.toArray(),
+                // 環境設定を保存に含める
+                environment: {
+                    bgColor: scene.background.getHex(), groundColor: plane.material.color.getHex(),
+                    ambLightInt: ambientLight.intensity, dirLightInt: dirLight.intensity,
+                    dirLightColor: dirLight.color.getHex(), dirLightPos: dirLight.position.toArray()
+                },
                 objects: state.objects.map(obj => {
-                    const data = {
-                        type: obj.userData.type,
-                        position: obj.position.toArray(),
-                        rotation: obj.rotation.toArray(),
-                        scale: obj.scale.toArray(),
-                        color: obj.userData.color
-                    };
+                    const data = { type: obj.userData.type, position: obj.position.toArray(), rotation: obj.rotation.toArray(), scale: obj.scale.toArray(), color: obj.userData.color };
                     if (obj.userData.type === 'person') {
                         data.joints = {
-                            leftArmX: obj.userData.joints.leftArm.rotation.x,
-                            rightArmX: obj.userData.joints.rightArm.rotation.x,
-                            leftLegX: obj.userData.joints.leftLeg.rotation.x,
-                            rightLegX: obj.userData.joints.rightLeg.rotation.x,
+                            leftArmX: obj.userData.joints.leftArm.rotation.x, rightArmX: obj.userData.joints.rightArm.rotation.x,
+                            leftLegX: obj.userData.joints.leftLeg.rotation.x, rightLegX: obj.userData.joints.rightLeg.rotation.x,
                         };
                     }
                     if (obj.userData.type === 'glb') {
-                        data.name = obj.userData.name;
-                        data.glbData = obj.userData.glbData; // GLBファイルをBase64で保存
+                        data.name = obj.userData.name; data.glbData = obj.userData.glbData;
                     }
                     return data;
                 })
@@ -334,77 +450,61 @@
 
             const jsonString = JSON.stringify(projectData);
             const blob = new Blob([jsonString], { type: 'application/json' });
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = '3d_project.json'; // 保存ファイル名
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+            const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = '3d_project.json';
+            document.body.appendChild(link); link.click(); document.body.removeChild(link);
         });
 
-        // 読み込みボタンのクリックでファイル選択を開く
-        document.getElementById('load-project-btn').addEventListener('click', () => {
-            document.getElementById('load-project-input').click();
-        });
+        document.getElementById('load-project-btn').addEventListener('click', () => { document.getElementById('load-project-input').click(); });
 
-        // 読み込み処理
         document.getElementById('load-project-input').addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-
+            const file = e.target.files[0]; if (!file) return;
             const reader = new FileReader();
             reader.onload = (event) => {
                 try {
                     const data = JSON.parse(event.target.result);
                     
-                    // 現在のシーンをリセット
                     state.objects.forEach(obj => scene.remove(obj));
-                    state.objects = [];
-                    transformControl.detach();
-                    state.selectedObject = null;
-                    if (objGui) objGui.hide();
-                    historyStack.length = 0; // 履歴もクリア
+                    state.objects = []; transformControl.detach(); state.selectedObject = null;
+                    if (objGui) objGui.hide(); historyStack.length = 0;
 
-                    // カメラの復元
                     if (data.cameraPos) camera.position.fromArray(data.cameraPos);
                     if (data.cameraTarget) controls.target.fromArray(data.cameraTarget);
 
-                    // オブジェクトの復元
+                    // 環境設定の復元
+                    if(data.environment) {
+                        scene.background.setHex(data.environment.bgColor); plane.material.color.setHex(data.environment.groundColor);
+                        ambientLight.intensity = data.environment.ambLightInt; dirLight.intensity = data.environment.dirLightInt;
+                        dirLight.color.setHex(data.environment.dirLightColor); dirLight.position.fromArray(data.environment.dirLightPos);
+                        
+                        envSettings.bgColor = data.environment.bgColor; envSettings.groundColor = data.environment.groundColor;
+                        envSettings.ambLightInt = data.environment.ambLightInt; envSettings.dirLightInt = data.environment.dirLightInt;
+                        envSettings.dirLightColor = data.environment.dirLightColor;
+                        envSettings.dirLightX = dirLight.position.x; envSettings.dirLightY = dirLight.position.y; envSettings.dirLightZ = dirLight.position.z;
+                        if(envGui) envGui.controllersRecursive().forEach(c => c.updateDisplay());
+                    }
+
                     data.objects.forEach(objData => {
                         let newObj;
-                        if (objData.type === 'building') {
-                            newObj = createBuilding();
-                            newObj.material.color.setHex(objData.color);
-                        } else if (objData.type === 'person') {
-                            newObj = createPerson();
-                            newObj.userData.material.color.setHex(objData.color);
-                            newObj.userData.joints.leftArm.rotation.x = objData.joints.leftArmX;
-                            newObj.userData.joints.rightArm.rotation.x = objData.joints.rightArmX;
-                            newObj.userData.joints.leftLeg.rotation.x = objData.joints.leftLegX;
-                            newObj.userData.joints.rightLeg.rotation.x = objData.joints.rightLegX;
+                        if (objData.type === 'building') { newObj = createBuilding(); newObj.material.color.setHex(objData.color); }
+                        else if (objData.type === 'person') {
+                            newObj = createPerson(); newObj.userData.material.color.setHex(objData.color);
+                            newObj.userData.joints.leftArm.rotation.x = objData.joints.leftArmX; newObj.userData.joints.rightArm.rotation.x = objData.joints.rightArmX;
+                            newObj.userData.joints.leftLeg.rotation.x = objData.joints.leftLegX; newObj.userData.joints.rightLeg.rotation.x = objData.joints.rightLegX;
                         } else if (objData.type === 'glb') {
-                            // GLBは非同期で読み込まれる
-                            loadGLB(objData.glbData, objData.name, objData);
-                            return; 
+                            loadGLB(objData.glbData, objData.name, objData); return; 
                         }
                         
-                        // 建物と人物の位置・回転・スケールの復元
                         if (newObj) {
-                            newObj.position.fromArray(objData.position);
-                            newObj.rotation.fromArray(objData.rotation);
-                            newObj.scale.fromArray(objData.scale);
+                            newObj.position.fromArray(objData.position); newObj.rotation.fromArray(objData.rotation); newObj.scale.fromArray(objData.scale);
                             newObj.userData.color = objData.color;
                         }
                     });
                     
+                    updateOutliner();
                     alert('プロジェクトを読み込みました！');
-                } catch (error) {
-                    console.error(error);
-                    alert('プロジェクトファイルの読み込みに失敗しました。');
-                }
+                } catch (error) { console.error(error); alert('読み込みに失敗しました。'); }
             };
-            reader.readAsText(file);
-            e.target.value = ''; // Inputをリセット（同じファイルを再度読めるように）
+            reader.readAsText(file); e.target.value = ''; 
         });
 
 
@@ -417,11 +517,8 @@
             if(state.mode !== 'placement') return alert('モデルを追加するには配置モードに切り替えてください。');
             const file = e.dataTransfer.files[0];
             if (file && (file.name.toLowerCase().endsWith('.glb') || file.name.toLowerCase().endsWith('.gltf'))) {
-                // ファイルをData URL(Base64)として読み込んでからloadGLBに渡す
                 const reader = new FileReader();
-                reader.onload = (ev) => {
-                    loadGLB(ev.target.result, file.name);
-                };
+                reader.onload = (ev) => { loadGLB(ev.target.result, file.name); };
                 reader.readAsDataURL(file);
             }
         });
@@ -449,11 +546,12 @@
                 if (selected.userData.type) selectObject(selected);
             } else {
                 transformControl.detach(); state.selectedObject = null; if (objGui) objGui.hide();
+                updateOutliner();
             }
         });
 
         function selectObject(obj) {
-            state.selectedObject = obj; transformControl.attach(obj); showObjectGUI(obj);
+            state.selectedObject = obj; transformControl.attach(obj); showObjectGUI(obj); updateOutliner();
         }
 
         // --- 7. GUI生成 ---
@@ -536,10 +634,12 @@
             if (state.mode === 'camera') {
                 document.getElementById('placement-ui').style.display = 'none';
                 document.getElementById('camera-ui').style.display = 'block';
+                document.getElementById('outliner-overlay').style.display = 'none'; // 撮影モード時はリストを隠す
                 setupCameraGUI(); updateAspect();
             } else {
                 document.getElementById('placement-ui').style.display = 'block';
                 document.getElementById('camera-ui').style.display = 'none';
+                document.getElementById('outliner-overlay').style.display = 'flex'; // 配置モードで再表示
                 if (cameraGui) cameraGui.hide();
                 resizeCanvas(); 
             }
