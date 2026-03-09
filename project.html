@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3Dオブジェクト配置・撮影システム (超拡張版)</title>
+    <title>3Dオブジェクト配置・撮影システム (360度背景修正版)</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #2c3e50; font-family: sans-serif; }
-        #canvas-container { width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; background-color: #2c3e50; }
+        body { margin: 0; overflow: hidden; background-color: #1a202c; font-family: sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; background-color: #1a202c; }
         canvas { display: block; outline: none; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
         
         /* 左側のメインUI */
@@ -27,6 +27,9 @@
         .hint { font-size: 11px; color: #555; margin-top: 5px; line-height: 1.4; padding: 5px; background: #f9f9f9; border-radius: 4px;}
         #drag-overlay { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.5); color: white; display: flex; justify-content: center; align-items: center; font-size: 24px; font-weight: bold; z-index: 100; pointer-events: none; opacity: 0; transition: opacity 0.2s; }
         hr { border: none; border-top: 1px solid #ddd; margin: 15px 0; }
+    
+        .lil-gui .controller.Function button { background-color: #ed8936; color: white; font-weight: bold; border: none; }
+        .lil-gui .controller.Function button:hover { background-color: #dd6b20; }
     </style>
     <script type="importmap">
         {
@@ -39,7 +42,7 @@
     </script>
 </head>
 <body>
-    <div id="drag-overlay">ここにGLBファイルをドロップ</div>
+    <div id="drag-overlay">ここにGLB/パノラマ画像をドロップ</div>
 
     <div id="ui-overlay">
         <h3 style="margin-top:0; font-size: 16px;">モード選択</h3>
@@ -52,12 +55,12 @@
             <button id="add-person">👤 人物を追加</button>
             <button id="add-building">🏢 建物を追加</button>
             <div class="hint">
-                <strong>📥 GLBファイルを画面にドラッグ＆ドロップ可能</strong><br><br>
+                <strong>📥 GLB/パノラマ写真を画面にドロップ可能</strong><br><br>
                 【操作ショートカット】<br>
                 T / R / S： 移動/回転/拡大縮小<br>
                 Delete： 選択オブジェクト削除<br>
-                <strong>Ctrl + C： コピー</strong><br>
-                <strong>Ctrl + V： ペースト (複製)</strong><br>
+                Ctrl + C： コピー<br>
+                Ctrl + V： ペースト (複製)<br>
                 Ctrl + Z： やり直し (Undo)
             </div>
             
@@ -66,6 +69,8 @@
             <button id="save-project" class="action-btn">💾 プロジェクトを保存</button>
             <button id="load-project-btn" class="action-btn" style="background-color: #2ecc71;">📂 プロジェクトを読込</button>
             <input type="file" id="load-project-input" accept=".json" style="display: none;">
+            
+            <input type="file" id="load-panorama-input" accept=".jpg,.jpeg,.png" style="display: none;">
         </div>
 
         <div id="camera-ui" style="display: none;">
@@ -99,12 +104,13 @@
         const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true }); 
         renderer.setPixelRatio(window.devicePixelRatio);
         renderer.shadowMap.enabled = true;
+        renderer.outputColorSpace = THREE.SRGBColorSpace; 
         container.appendChild(renderer.domElement);
 
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x87CEEB); // デフォルトの空の色
+        scene.background = new THREE.Color(0x87CEEB); 
         
-        const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+        const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 2000); 
         camera.position.set(0, 5, 15);
 
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
@@ -112,14 +118,16 @@
         const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
         dirLight.position.set(10, 20, 10);
         dirLight.castShadow = true;
-        dirLight.shadow.mapSize.width = 2048; // 影をきれいに
+        dirLight.shadow.mapSize.width = 2048; 
         dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.left = -50; dirLight.shadow.camera.right = 50;
+        dirLight.shadow.camera.top = 50; dirLight.shadow.camera.bottom = -50;
         scene.add(dirLight);
 
-        const gridHelper = new THREE.GridHelper(50, 50);
+        const gridHelper = new THREE.GridHelper(100, 100); 
         scene.add(gridHelper);
         const plane = new THREE.Mesh(
-            new THREE.PlaneGeometry(100, 100),
+            new THREE.PlaneGeometry(200, 200), 
             new THREE.MeshStandardMaterial({ color: 0x999999, depthWrite: false })
         );
         plane.rotation.x = -Math.PI / 2;
@@ -128,34 +136,45 @@
 
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
+        controls.minDistance = 1; controls.maxDistance = 1000;
 
         const transformControl = new TransformControls(camera, renderer.domElement);
         scene.add(transformControl);
+
+        const textureLoader = new THREE.TextureLoader();
 
         // --- 2. 状態管理・Undoシステム ---
         const state = { mode: 'placement', aspectRatio: 16 / 9, objects: [], selectedObject: null };
         let objGui = null;
         let cameraGui = null;
         const guiRefs = { objPos: {}, camPos: {}, camTarget: {} };
-
-        // ★ 追加: クリップボード (コピー用)
         let clipboard = null;
 
-        // ★ 追加: 環境・照明設定 (グローバルGUI)
         const envSettings = {
+            bgType: 'color',
             bgColor: scene.background.getHex(),
+            bgPanoramaURL: null, 
+            showGround: true, 
             groundColor: plane.material.color.getHex(),
             ambLightInt: ambientLight.intensity,
             dirLightInt: dirLight.intensity,
             dirLightColor: dirLight.color.getHex(),
-            dirLightX: dirLight.position.x,
-            dirLightY: dirLight.position.y,
-            dirLightZ: dirLight.position.z,
+            dirLightX: dirLight.position.x, dirLightY: dirLight.position.y, dirLightZ: dirLight.position.z,
+            loadPanorama: () => document.getElementById('load-panorama-input').click()
         };
 
         const envGui = new GUI({ title: '🌍 環境・照明設定' });
-        envGui.addColor(envSettings, 'bgColor').name('空（背景）の色').onChange(c => scene.background.setHex(c));
-        envGui.addColor(envSettings, 'groundColor').name('地面の色').onChange(c => plane.material.color.setHex(c));
+        
+        const bgFolder = envGui.addFolder('背景・地面');
+        bgFolder.add(envSettings, 'bgType', { '🎨 単色': 'color', '📷 360度パノラマ': 'panorama' }).name('背景タイプ').onChange(v => updateBgVisibility());
+        const bgColorCtrl = bgFolder.addColor(envSettings, 'bgColor').name('空（背景）の色').onChange(c => scene.background.setHex(c));
+        const bgPanoBtn = bgFolder.add(envSettings, 'loadPanorama').name('📷 パノラマ画像を読み込む');
+        
+        bgFolder.add(envSettings, 'showGround').name('🔲 地面とグリッドを表示').onChange(v => {
+            plane.visible = v; gridHelper.visible = v;
+        });
+        bgFolder.addColor(envSettings, 'groundColor').name('地面の色').onChange(c => plane.material.color.setHex(c));
+
         const lightFolder = envGui.addFolder('照明（ライト）');
         lightFolder.add(envSettings, 'ambLightInt', 0, 2).name('全体の明るさ').onChange(v => ambientLight.intensity = v);
         lightFolder.add(envSettings, 'dirLightInt', 0, 3).name('太陽の強さ').onChange(v => dirLight.intensity = v);
@@ -164,7 +183,50 @@
         lightFolder.add(envSettings, 'dirLightY', 0, 50).name('太陽の高さ (Y)').onChange(v => dirLight.position.y = v);
         lightFolder.add(envSettings, 'dirLightZ', -50, 50).name('太陽の向き (Z)').onChange(v => dirLight.position.z = v);
 
-        // Undo用履歴
+        function updateBgVisibility() {
+            if (envSettings.bgType === 'color') {
+                bgColorCtrl.show(); bgPanoBtn.hide();
+                scene.background = new THREE.Color(envSettings.bgColor);
+                scene.environment = null; 
+            } else {
+                bgColorCtrl.hide(); bgPanoBtn.show();
+                if (envSettings.bgPanoramaURL) setPanoramaBackground(envSettings.bgPanoramaURL, true);
+                else scene.background = new THREE.Color(0x000000); 
+            }
+        }
+        updateBgVisibility(); 
+
+        // ★ 修正箇所：エラーになっていたローディング処理を修正
+        function setPanoramaBackground(dataURL, isRestoring = false) {
+            envSettings.bgPanoramaURL = dataURL;
+            document.body.style.cursor = 'wait'; // ここを修正
+
+            textureLoader.load(dataURL, (texture) => {
+                texture.mapping = THREE.EquirectangularReflectionMapping; 
+                texture.colorSpace = THREE.SRGBColorSpace;
+                
+                if (envSettings.bgType === 'panorama') {
+                    scene.background = texture;
+                    scene.environment = texture; 
+                }
+                
+                document.body.style.cursor = 'auto'; // ここを修正
+                
+                if (!isRestoring) {
+                    envSettings.showGround = false;
+                    plane.visible = false; gridHelper.visible = false;
+                    saveHistory();
+                    if(envGui) envGui.controllersRecursive().forEach(c => c.updateDisplay());
+                }
+            }, undefined, (error) => {
+                document.body.style.cursor = 'auto'; // ここを修正
+                console.error('パノラマ画像の読み込みに失敗しました', error);
+                alert('画像の読み込みに失敗しました。正距円筒図法の形式か確認してください。');
+                envSettings.bgPanoramaURL = null;
+                updateBgVisibility();
+            });
+        }
+
         const historyStack = [];
         const MAX_HISTORY = 30;
 
@@ -181,9 +243,9 @@
                 }
                 return data;
             });
-            // 環境設定も履歴に含める
             const envSnapshot = {
-                bgColor: scene.background.getHex(), groundColor: plane.material.color.getHex(),
+                bgType: envSettings.bgType, bgColor: envSettings.bgColor, bgPanoramaURL: envSettings.bgPanoramaURL,
+                showGround: envSettings.showGround, groundColor: plane.material.color.getHex(),
                 ambLightInt: ambientLight.intensity, dirLightInt: dirLight.intensity,
                 dirLightColor: dirLight.color.getHex(), dirLightPos: dirLight.position.clone()
             };
@@ -218,16 +280,22 @@
                 }
             });
 
-            // 環境設定の復元
             if(snapshot.env) {
-                scene.background.setHex(snapshot.env.bgColor); plane.material.color.setHex(snapshot.env.groundColor);
+                envSettings.bgType = snapshot.env.bgType; envSettings.bgColor = snapshot.env.bgColor;
+                envSettings.bgPanoramaURL = snapshot.env.bgPanoramaURL; envSettings.showGround = snapshot.env.showGround;
+                envSettings.groundColor = snapshot.env.groundColor;
+                
+                plane.material.color.setHex(snapshot.env.groundColor); plane.visible = snapshot.env.showGround;
+                gridHelper.visible = snapshot.env.showGround;
+                
                 ambientLight.intensity = snapshot.env.ambLightInt; dirLight.intensity = snapshot.env.dirLightInt;
                 dirLight.color.setHex(snapshot.env.dirLightColor); dirLight.position.copy(snapshot.env.dirLightPos);
                 
-                envSettings.bgColor = snapshot.env.bgColor; envSettings.groundColor = snapshot.env.groundColor;
                 envSettings.ambLightInt = snapshot.env.ambLightInt; envSettings.dirLightInt = snapshot.env.dirLightInt;
                 envSettings.dirLightColor = snapshot.env.dirLightColor;
                 envSettings.dirLightX = snapshot.env.dirLightPos.x; envSettings.dirLightY = snapshot.env.dirLightPos.y; envSettings.dirLightZ = snapshot.env.dirLightPos.z;
+                
+                updateBgVisibility(); 
                 if(envGui) envGui.controllersRecursive().forEach(c => c.updateDisplay());
             }
 
@@ -236,29 +304,18 @@
             updateOutliner();
         }
 
-        // --- ★ 追加: アウトライナーの更新処理 ---
         function updateOutliner() {
             const container = document.getElementById('outliner-list');
             container.innerHTML = '';
-            
-            // 逆順（新しいものが上）で表示
             [...state.objects].reverse().forEach((obj) => {
                 const div = document.createElement('div');
                 div.className = 'outliner-item' + (state.selectedObject === obj ? ' selected' : '');
-                
-                let icon = '📦';
-                let name = obj.userData.name || 'オブジェクト';
+                let icon = '📦'; let name = obj.userData.name || 'オブジェクト';
                 if (obj.userData.type === 'building') { icon = '🏢'; name = '建物'; }
                 else if (obj.userData.type === 'person') { icon = '👤'; name = '人物'; }
                 else if (obj.userData.type === 'glb') { icon = '📥'; }
-
                 div.textContent = `${icon} ${name} ${obj.userData.id}`;
-                
-                // リストクリックで選択
-                div.onclick = () => {
-                    if (transformControl.dragging) return;
-                    selectObject(obj);
-                };
+                div.onclick = () => { if (transformControl.dragging) return; selectObject(obj); };
                 container.appendChild(div);
             });
         }
@@ -287,125 +344,75 @@
             }
         });
 
-        // --- ★ 追加: コピー＆ペースト (複製) 処理 ---
         function duplicateObject(sourceObj) {
             saveHistory();
             let newObj;
-
             if (sourceObj.userData.type === 'building') {
-                newObj = createBuilding();
-                newObj.material.color.setHex(sourceObj.userData.color);
+                newObj = createBuilding(); newObj.material.color.setHex(sourceObj.userData.color);
             } else if (sourceObj.userData.type === 'person') {
-                newObj = createPerson();
-                newObj.userData.material.color.setHex(sourceObj.userData.color);
-                const sj = sourceObj.userData.joints;
-                const nj = newObj.userData.joints;
+                newObj = createPerson(); newObj.userData.material.color.setHex(sourceObj.userData.color);
+                const sj = sourceObj.userData.joints; const nj = newObj.userData.joints;
                 nj.leftArm.rotation.x = sj.leftArm.rotation.x; nj.rightArm.rotation.x = sj.rightArm.rotation.x;
                 nj.leftLeg.rotation.x = sj.leftLeg.rotation.x; nj.rightLeg.rotation.x = sj.rightLeg.rotation.x;
             } else if (sourceObj.userData.type === 'glb') {
-                // GLBの複製
-                const initData = {
-                    position: [sourceObj.position.x + 1.5, sourceObj.position.y, sourceObj.position.z + 1.5],
-                    rotation: sourceObj.rotation.toArray(),
-                    scale: sourceObj.scale.toArray()
-                };
-                loadGLB(sourceObj.userData.glbData, sourceObj.userData.name, initData);
-                return; // loadGLB内で追加・選択処理を行うためここで終了
+                const initData = { position: [sourceObj.position.x + 2, sourceObj.position.y, sourceObj.position.z + 2], rotation: sourceObj.rotation.toArray(), scale: sourceObj.scale.toArray() };
+                loadGLB(sourceObj.userData.glbData, sourceObj.userData.name, initData); return; 
             }
-
             if (newObj) {
-                newObj.position.copy(sourceObj.position);
-                // 重ならないように少しずらす
-                newObj.position.x += 1.5; 
-                newObj.position.z += 1.5;
-                newObj.rotation.copy(sourceObj.rotation);
-                newObj.scale.copy(sourceObj.scale);
+                newObj.position.copy(sourceObj.position); newObj.position.x += 2; newObj.position.z += 2; 
+                newObj.rotation.copy(sourceObj.rotation); newObj.scale.copy(sourceObj.scale);
                 selectObject(newObj);
             }
         }
 
-        // キーボード操作
         window.addEventListener('keydown', function (event) {
             if (state.mode !== 'placement') return;
-            
-            // Undo
-            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
-                event.preventDefault(); undo(); return;
-            }
-            // Copy
-            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
-                if (state.selectedObject) { clipboard = state.selectedObject; }
-            }
-            // Paste (複製)
-            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
-                if (clipboard) duplicateObject(clipboard);
-            }
-
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); undo(); return; }
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') { if (state.selectedObject) { clipboard = state.selectedObject; } }
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') { if (clipboard) duplicateObject(clipboard); }
             switch (event.key.toLowerCase()) {
                 case 't': transformControl.setMode('translate'); break;
                 case 'r': transformControl.setMode('rotate'); break;
                 case 's': transformControl.setMode('scale'); break;
                 case 'delete': 
-                case 'backspace':
-                    if(state.selectedObject) { saveHistory(); deleteObject(state.selectedObject); }
-                    break;
+                case 'backspace': if(state.selectedObject) { saveHistory(); deleteObject(state.selectedObject); } break;
             }
         });
 
-
         // --- 4. オブジェクト生成関数 ---
         let objectCounter = 0;
-
         function deleteObject(obj) {
             transformControl.detach(); scene.remove(obj);
             state.objects = state.objects.filter(o => o !== obj);
             state.selectedObject = null; if (objGui) objGui.hide();
             updateOutliner();
         }
-
         const gltfLoader = new GLTFLoader();
         function loadGLB(dataURL, name, initialData = null) {
             gltfLoader.load(dataURL, (gltf) => {
                 if(!initialData) saveHistory(); 
                 const model = gltf.scene;
                 model.traverse((child) => { if (child.isMesh) { child.castShadow = true; child.receiveShadow = true; } });
-                
-                if (initialData) {
-                    model.position.fromArray(initialData.position);
-                    model.rotation.fromArray(initialData.rotation);
-                    model.scale.fromArray(initialData.scale);
-                } else {
-                    model.position.set(0, 0, 0); 
-                }
-                
+                if (initialData) { model.position.fromArray(initialData.position); model.rotation.fromArray(initialData.rotation); model.scale.fromArray(initialData.scale); }
+                else { model.position.set(0, 0, 0); }
                 model.userData = { type: 'glb', id: ++objectCounter, name: name, glbData: dataURL };
-                scene.add(model);
-                state.objects.push(model);
-                selectObject(model);
-                updateOutliner();
+                scene.add(model); state.objects.push(model); selectObject(model); updateOutliner();
             });
         }
-
         function createBuilding() {
             const geometry = new THREE.BoxGeometry(2, 4, 2); geometry.translate(0, 2, 0); 
             const material = new THREE.MeshStandardMaterial({ color: Math.random() * 0xffffff });
-            const building = new THREE.Mesh(geometry, material);
-            building.castShadow = true;
+            const building = new THREE.Mesh(geometry, material); building.castShadow = true;
             building.position.set((Math.random() - 0.5) * 10, 0, (Math.random() - 0.5) * 10);
             building.userData = { type: 'building', id: ++objectCounter, color: material.color.getHex() };
-            scene.add(building); state.objects.push(building); 
-            updateOutliner();
-            return building;
+            scene.add(building); state.objects.push(building); updateOutliner(); return building;
         }
-
         function createPerson() {
             const personGroup = new THREE.Group();
-            const color = Math.random() * 0xffffff;
-            const material = new THREE.MeshStandardMaterial({ color: color });
+            const color = Math.random() * 0xffffff; const material = new THREE.MeshStandardMaterial({ color: color });
             const bodyGeo = new THREE.BoxGeometry(1, 1.5, 0.5); bodyGeo.translate(0, 0.75, 0);
             const body = new THREE.Mesh(bodyGeo, material); body.position.y = 1.5; body.castShadow = true; personGroup.add(body);
             const head = new THREE.Mesh(new THREE.SphereGeometry(0.4), material); head.position.y = 1.8; head.castShadow = true; body.add(head);
-
             function createLimb(w, h, d, yPos) {
                 const geo = new THREE.BoxGeometry(w, h, d); geo.translate(0, -h/2, 0);
                 const mesh = new THREE.Mesh(geo, material); mesh.position.y = yPos; mesh.castShadow = true; return mesh;
@@ -414,22 +421,17 @@
             const rightArm = createLimb(0.3, 1.2, 0.3, 1.4); rightArm.position.x = 0.7; body.add(rightArm);
             const leftLeg = createLimb(0.4, 1.5, 0.4, 0); leftLeg.position.x = -0.3; body.add(leftLeg);
             const rightLeg = createLimb(0.4, 1.5, 0.4, 0); rightLeg.position.x = 0.3; body.add(rightLeg);
-
             personGroup.position.set((Math.random() - 0.5) * 10, 0, (Math.random() - 0.5) * 10);
             personGroup.userData = { type: 'person', id: ++objectCounter, color: color, material: material, joints: { leftArm, rightArm, leftLeg, rightLeg } };
-            scene.add(personGroup); state.objects.push(personGroup); 
-            updateOutliner();
-            return personGroup;
+            scene.add(personGroup); state.objects.push(personGroup); updateOutliner(); return personGroup;
         }
 
-        // --- 5. プロジェクトのセーブ＆ロード ---
         document.getElementById('save-project').addEventListener('click', () => {
             const projectData = {
-                cameraPos: camera.position.toArray(),
-                cameraTarget: controls.target.toArray(),
-                // 環境設定を保存に含める
+                cameraPos: camera.position.toArray(), cameraTarget: controls.target.toArray(),
                 environment: {
-                    bgColor: scene.background.getHex(), groundColor: plane.material.color.getHex(),
+                    bgType: envSettings.bgType, bgColor: envSettings.bgColor, bgPanoramaURL: envSettings.bgPanoramaURL,
+                    showGround: envSettings.showGround, groundColor: plane.material.color.getHex(),
                     ambLightInt: ambientLight.intensity, dirLightInt: dirLight.intensity,
                     dirLightColor: dirLight.color.getHex(), dirLightPos: dirLight.position.toArray()
                 },
@@ -441,15 +443,11 @@
                             leftLegX: obj.userData.joints.leftLeg.rotation.x, rightLegX: obj.userData.joints.rightLeg.rotation.x,
                         };
                     }
-                    if (obj.userData.type === 'glb') {
-                        data.name = obj.userData.name; data.glbData = obj.userData.glbData;
-                    }
+                    if (obj.userData.type === 'glb') { data.name = obj.userData.name; data.glbData = obj.userData.glbData; }
                     return data;
                 })
             };
-
-            const jsonString = JSON.stringify(projectData);
-            const blob = new Blob([jsonString], { type: 'application/json' });
+            const blob = new Blob([JSON.stringify(projectData)], { type: 'application/json' });
             const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = '3d_project.json';
             document.body.appendChild(link); link.click(); document.body.removeChild(link);
         });
@@ -462,24 +460,28 @@
             reader.onload = (event) => {
                 try {
                     const data = JSON.parse(event.target.result);
-                    
                     state.objects.forEach(obj => scene.remove(obj));
                     state.objects = []; transformControl.detach(); state.selectedObject = null;
                     if (objGui) objGui.hide(); historyStack.length = 0;
-
                     if (data.cameraPos) camera.position.fromArray(data.cameraPos);
                     if (data.cameraTarget) controls.target.fromArray(data.cameraTarget);
 
-                    // 環境設定の復元
                     if(data.environment) {
-                        scene.background.setHex(data.environment.bgColor); plane.material.color.setHex(data.environment.groundColor);
+                        envSettings.bgType = data.environment.bgType; envSettings.bgColor = data.environment.bgColor;
+                        envSettings.bgPanoramaURL = data.environment.bgPanoramaURL; envSettings.showGround = data.environment.showGround;
+                        envSettings.groundColor = data.environment.groundColor;
+                        
+                        plane.material.color.setHex(data.environment.groundColor);
+                        plane.visible = data.environment.showGround; gridHelper.visible = data.environment.showGround;
+                        
                         ambientLight.intensity = data.environment.ambLightInt; dirLight.intensity = data.environment.dirLightInt;
                         dirLight.color.setHex(data.environment.dirLightColor); dirLight.position.fromArray(data.environment.dirLightPos);
                         
-                        envSettings.bgColor = data.environment.bgColor; envSettings.groundColor = data.environment.groundColor;
                         envSettings.ambLightInt = data.environment.ambLightInt; envSettings.dirLightInt = data.environment.dirLightInt;
                         envSettings.dirLightColor = data.environment.dirLightColor;
                         envSettings.dirLightX = dirLight.position.x; envSettings.dirLightY = dirLight.position.y; envSettings.dirLightZ = dirLight.position.z;
+                        
+                        updateBgVisibility(); 
                         if(envGui) envGui.controllersRecursive().forEach(c => c.updateDisplay());
                     }
 
@@ -490,74 +492,71 @@
                             newObj = createPerson(); newObj.userData.material.color.setHex(objData.color);
                             newObj.userData.joints.leftArm.rotation.x = objData.joints.leftArmX; newObj.userData.joints.rightArm.rotation.x = objData.joints.rightArmX;
                             newObj.userData.joints.leftLeg.rotation.x = objData.joints.leftLegX; newObj.userData.joints.rightLeg.rotation.x = objData.joints.rightLegX;
-                        } else if (objData.type === 'glb') {
-                            loadGLB(objData.glbData, objData.name, objData); return; 
-                        }
-                        
-                        if (newObj) {
-                            newObj.position.fromArray(objData.position); newObj.rotation.fromArray(objData.rotation); newObj.scale.fromArray(objData.scale);
-                            newObj.userData.color = objData.color;
-                        }
+                        } else if (objData.type === 'glb') { loadGLB(objData.glbData, objData.name, objData); return; }
+                        if (newObj) { newObj.position.fromArray(objData.position); newObj.rotation.fromArray(objData.rotation); newObj.scale.fromArray(objData.scale); newObj.userData.color = objData.color; }
                     });
-                    
-                    updateOutliner();
-                    alert('プロジェクトを読み込みました！');
+                    updateOutliner(); alert('プロジェクトを読み込みました！');
                 } catch (error) { console.error(error); alert('読み込みに失敗しました。'); }
             };
             reader.readAsText(file); e.target.value = ''; 
         });
 
-
-        // --- 6. ドラッグ＆ドロップ イベント ---
         const dragOverlay = document.getElementById('drag-overlay');
         window.addEventListener('dragover', (e) => { e.preventDefault(); if(state.mode === 'placement') dragOverlay.style.opacity = '1'; });
         window.addEventListener('dragleave', (e) => { e.preventDefault(); dragOverlay.style.opacity = '0'; });
         window.addEventListener('drop', (e) => {
             e.preventDefault(); dragOverlay.style.opacity = '0';
-            if(state.mode !== 'placement') return alert('モデルを追加するには配置モードに切り替えてください。');
-            const file = e.dataTransfer.files[0];
-            if (file && (file.name.toLowerCase().endsWith('.glb') || file.name.toLowerCase().endsWith('.gltf'))) {
-                const reader = new FileReader();
+            if(state.mode !== 'placement') return alert('追加するには配置モードに切り替えてください。');
+            const file = e.dataTransfer.files[0]; if (!file) return;
+            const reader = new FileReader();
+            
+            if (file.name.toLowerCase().endsWith('.glb') || file.name.toLowerCase().endsWith('.gltf')) {
                 reader.onload = (ev) => { loadGLB(ev.target.result, file.name); };
+                reader.readAsDataURL(file);
+            } else if (file.type.startsWith('image/')) {
+                reader.onload = (ev) => {
+                    saveHistory(); 
+                    envSettings.bgType = 'panorama';
+                    updateBgVisibility();
+                    setPanoramaBackground(ev.target.result);
+                };
                 reader.readAsDataURL(file);
             }
         });
+        
+        document.getElementById('load-panorama-input').addEventListener('change', (e) => {
+            const file = e.target.files[0]; if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                saveHistory();
+                setPanoramaBackground(ev.target.result);
+            };
+            reader.readAsDataURL(file);
+            e.target.value = ''; 
+        });
 
-        // クリック選択
-        const raycaster = new THREE.Raycaster();
-        const mouse = new THREE.Vector2();
-        let clickStartX = 0, clickStartY = 0;
-
+        const raycaster = new THREE.Raycaster(); const mouse = new THREE.Vector2(); let clickStartX = 0, clickStartY = 0;
         renderer.domElement.addEventListener('pointerdown', (e) => { clickStartX = e.clientX; clickStartY = e.clientY; });
         renderer.domElement.addEventListener('pointerup', (e) => {
             if (state.mode !== 'placement' || transformControl.dragging) return;
             if (Math.abs(e.clientX - clickStartX) > 5 || Math.abs(e.clientY - clickStartY) > 5) return;
-
             const rect = renderer.domElement.getBoundingClientRect();
-            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1; 
-            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-            
-            raycaster.setFromCamera(mouse, camera);
-            const intersects = raycaster.intersectObjects(state.objects, true);
-
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1; mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera); const intersects = raycaster.intersectObjects(state.objects, true);
             if (intersects.length > 0) {
                 let selected = intersects[0].object;
                 while(selected.parent && selected.parent.type !== 'Scene' && !selected.userData.type) selected = selected.parent;
                 if (selected.userData.type) selectObject(selected);
             } else {
-                transformControl.detach(); state.selectedObject = null; if (objGui) objGui.hide();
-                updateOutliner();
+                transformControl.detach(); state.selectedObject = null; if (objGui) objGui.hide(); updateOutliner();
             }
         });
 
-        function selectObject(obj) {
-            state.selectedObject = obj; transformControl.attach(obj); showObjectGUI(obj); updateOutliner();
-        }
+        function selectObject(obj) { state.selectedObject = obj; transformControl.attach(obj); showObjectGUI(obj); updateOutliner(); }
 
         // --- 7. GUI生成 ---
         function showObjectGUI(obj) {
             if (objGui) objGui.destroy();
-            
             let title = obj.userData.type === 'building' ? '建物' : (obj.userData.type === 'person' ? '人物' : `外部モデル (${obj.userData.name})`);
             objGui = new GUI({ title: `${title} ${obj.userData.id} 設定` });
             
@@ -574,122 +573,72 @@
                     obj.userData.color = c;
                 });
             }
-
             if (['building', 'glb', 'person'].includes(obj.userData.type)) {
                 const scaleFolder = objGui.addFolder('サイズ / 回転');
                 const maxScale = (obj.userData.type === 'glb') ? 50 : 20;
-
                 const uniformScale = { ratio: obj.scale.x };
                 scaleFolder.add(uniformScale, 'ratio', 0.01, maxScale).name('✨ 全体スケール').onChange((v) => { obj.scale.set(v, v, v); });
-                scaleFolder.add(obj.scale, 'x', 0.01, maxScale).name('幅 (X)');
-                scaleFolder.add(obj.scale, 'y', 0.01, maxScale).name('高さ (Y)');
-                scaleFolder.add(obj.scale, 'z', 0.01, maxScale).name('奥行 (Z)');
-                
+                scaleFolder.add(obj.scale, 'x', 0.01, maxScale).name('幅 (X)'); scaleFolder.add(obj.scale, 'y', 0.01, maxScale).name('高さ (Y)'); scaleFolder.add(obj.scale, 'z', 0.01, maxScale).name('奥行 (Z)');
                 if(obj.userData.type === 'glb') {
                     scaleFolder.add(obj.rotation, 'x', -Math.PI, Math.PI).name('X軸回転').onChange(()=> transformControl.update());
                     scaleFolder.add(obj.rotation, 'y', -Math.PI, Math.PI).name('Y軸回転').onChange(()=> transformControl.update());
                     scaleFolder.add(obj.rotation, 'z', -Math.PI, Math.PI).name('Z軸回転').onChange(()=> transformControl.update());
-                } else if (obj.userData.type === 'person') {
-                    scaleFolder.add(obj.rotation, 'y', -Math.PI, Math.PI).name('Y軸回転 (向き)').onChange(()=> transformControl.update());
-                }
+                } else if (obj.userData.type === 'person') { scaleFolder.add(obj.rotation, 'y', -Math.PI, Math.PI).name('Y軸回転 (向き)').onChange(()=> transformControl.update()); }
             }
-
             if (obj.userData.type === 'person') {
-                const jointFolder = objGui.addFolder('関節の回転');
-                const j = obj.userData.joints;
-                jointFolder.add(j.leftArm.rotation, 'x', -Math.PI, Math.PI).name('左腕');
-                jointFolder.add(j.rightArm.rotation, 'x', -Math.PI, Math.PI).name('右腕');
-                jointFolder.add(j.leftLeg.rotation, 'x', -Math.PI/2, Math.PI/2).name('左脚');
-                jointFolder.add(j.rightLeg.rotation, 'x', -Math.PI/2, Math.PI/2).name('右脚');
+                const jointFolder = objGui.addFolder('関節の回転'); const j = obj.userData.joints;
+                jointFolder.add(j.leftArm.rotation, 'x', -Math.PI, Math.PI).name('左腕'); jointFolder.add(j.rightArm.rotation, 'x', -Math.PI, Math.PI).name('右腕'); jointFolder.add(j.leftLeg.rotation, 'x', -Math.PI/2, Math.PI/2).name('左脚'); jointFolder.add(j.rightLeg.rotation, 'x', -Math.PI/2, Math.PI/2).name('右脚');
             }
         }
 
         function setupCameraGUI() {
             if (cameraGui) cameraGui.destroy();
             cameraGui = new GUI({ title: 'カメラ・構図設定' });
-            
-            const posFolder = cameraGui.addFolder('カメラの位置 (マウス連動)');
-            guiRefs.camPos.x = posFolder.add(camera.position, 'x', -50, 50).name('X座標 (左右)');
-            guiRefs.camPos.y = posFolder.add(camera.position, 'y', -10, 50).name('Y座標 (高さ)');
-            guiRefs.camPos.z = posFolder.add(camera.position, 'z', -50, 50).name('Z座標 (前後)');
-
-            const targetFolder = cameraGui.addFolder('注視点 (カメラの向き・横移動)');
-            guiRefs.camTarget.x = targetFolder.add(controls.target, 'x', -50, 50).name('X座標 (横)');
-            guiRefs.camTarget.y = targetFolder.add(controls.target, 'y', -10, 50).name('Y座標 (高さ)');
-            guiRefs.camTarget.z = targetFolder.add(controls.target, 'z', -50, 50).name('Z座標 (奥)');
-
             cameraGui.add(camera, 'fov', 10, 120).name('画角 (ズーム)').onChange(() => { camera.updateProjectionMatrix(); });
+            const posFolder = cameraGui.addFolder('カメラの位置 (マウス連動)');
+            guiRefs.camPos.x = posFolder.add(camera.position, 'x', -100, 100).name('X座標 (左右)'); guiRefs.camPos.y = posFolder.add(camera.position, 'y', -10, 100).name('Y座標 (高さ)'); guiRefs.camPos.z = posFolder.add(camera.position, 'z', -100, 100).name('Z座標 (前後)');
+            const targetFolder = cameraGui.addFolder('注視点 (カメラの向き・横移動)');
+            guiRefs.camTarget.x = targetFolder.add(controls.target, 'x', -100, 100).name('X座標 (横)'); guiRefs.camTarget.y = targetFolder.add(controls.target, 'y', -10, 100).name('Y座標 (高さ)'); guiRefs.camTarget.z = targetFolder.add(controls.target, 'z', -100, 100).name('Z座標 (奥)');
             cameraGui.show();
         }
 
         // --- 8. UIイベント ---
         document.getElementById('add-person').addEventListener('click', () => { saveHistory(); selectObject(createPerson()); });
         document.getElementById('add-building').addEventListener('click', () => { saveHistory(); selectObject(createBuilding()); });
-
         document.getElementById('mode-select').addEventListener('change', (e) => {
-            state.mode = e.target.value;
-            if (objGui) objGui.hide();
-            transformControl.detach(); 
-            
+            state.mode = e.target.value; if (objGui) objGui.hide(); transformControl.detach(); 
             if (state.mode === 'camera') {
-                document.getElementById('placement-ui').style.display = 'none';
-                document.getElementById('camera-ui').style.display = 'block';
-                document.getElementById('outliner-overlay').style.display = 'none'; // 撮影モード時はリストを隠す
-                setupCameraGUI(); updateAspect();
+                document.getElementById('placement-ui').style.display = 'none'; document.getElementById('camera-ui').style.display = 'block'; document.getElementById('outliner-overlay').style.display = 'none';
+                if(envGui) envGui.hide(); setupCameraGUI(); updateAspect();
             } else {
-                document.getElementById('placement-ui').style.display = 'block';
-                document.getElementById('camera-ui').style.display = 'none';
-                document.getElementById('outliner-overlay').style.display = 'flex'; // 配置モードで再表示
-                if (cameraGui) cameraGui.hide();
-                resizeCanvas(); 
+                document.getElementById('placement-ui').style.display = 'block'; document.getElementById('camera-ui').style.display = 'none'; document.getElementById('outliner-overlay').style.display = 'flex';
+                if (cameraGui) cameraGui.hide(); if(envGui) envGui.show(); resizeCanvas(); 
             }
         });
-
-        const aspectSelect = document.getElementById('aspect-select');
-        aspectSelect.addEventListener('change', updateAspect);
-
-        function updateAspect() {
-            if (state.mode !== 'camera') return;
-            const ratios = { '16:9': 16/9, '9:16': 9/16, '1:1': 1 };
-            state.aspectRatio = ratios[aspectSelect.value];
-            resizeCanvas();
-        }
-
+        const aspectSelect = document.getElementById('aspect-select'); aspectSelect.addEventListener('change', updateAspect);
+        function updateAspect() { if (state.mode !== 'camera') return; const ratios = { '16:9': 16/9, '9:16': 9/16, '1:1': 1 }; state.aspectRatio = ratios[aspectSelect.value]; resizeCanvas(); }
         function resizeCanvas() {
             const width = window.innerWidth; const height = window.innerHeight;
             if (state.mode === 'camera') {
                 let renderWidth = width; let renderHeight = width / state.aspectRatio;
                 if (renderHeight > height) { renderHeight = height; renderWidth = height * state.aspectRatio; }
                 renderer.setSize(renderWidth, renderHeight); camera.aspect = state.aspectRatio;
-            } else {
-                renderer.setSize(width, height); camera.aspect = width / height;
-            }
+            } else { renderer.setSize(width, height); camera.aspect = width / height; }
             camera.updateProjectionMatrix();
         }
         window.addEventListener('resize', resizeCanvas); resizeCanvas();
-
         document.getElementById('take-photo').addEventListener('click', () => {
             renderer.render(scene, camera); 
             const dataURL = renderer.domElement.toDataURL('image/png');
-            const img = document.getElementById('photo-result');
-            img.src = dataURL; img.style.display = 'block';
-            setTimeout(() => { img.style.display = 'none'; }, 4000); 
-            
-            const link = document.createElement('a');
-            link.download = '3d_capture.png'; link.href = dataURL;
-            document.body.appendChild(link); link.click(); document.body.removeChild(link);
+            const img = document.getElementById('photo-result'); img.src = dataURL; img.style.display = 'block';
+            setTimeout(() => { img.style.display = 'none'; }, 4000); const link = document.createElement('a'); link.download = '3d_capture.png'; link.href = dataURL; document.body.appendChild(link); link.click(); document.body.removeChild(link);
         });
 
         // --- 初期セットアップ ---
         const firstPerson = createPerson(); selectObject(firstPerson); 
 
         // --- 9. アニメーションループ ---
-        function animate() {
-            requestAnimationFrame(animate);
-            controls.update(); 
-            renderer.render(scene, camera);
-        }
-        animate();
+        function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); } animate();
     </script>
 </body>
 </html>
