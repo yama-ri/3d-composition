@@ -31,7 +31,8 @@
 ## 使い方 (Usage)
 
 ### セットアップ
-特別なビルド環境は不要です。`index.html` をブラウザ（Chrome, Edge, Firefox, Safari等）で開くだけで動作します。
+特別なビルド環境は不要です。`project
+.html` をブラウザ（Chrome, Edge, Firefox, Safari等）で開くだけで動作します。
 （※ ローカルサーバー環境での起動を推奨します。VS Code拡張機能の「Live Server」などが便利です。）
 
 ### 基本操作ショートカット
